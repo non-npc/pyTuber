@@ -6,7 +6,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QLineEdit, QLabel, QTextEdit, QFileDialog, QTabWidget,
     QProgressBar, QMessageBox, QGroupBox, QListWidget, QListWidgetItem,
-    QComboBox, QRadioButton, QButtonGroup
+    QComboBox, QRadioButton, QButtonGroup, QCheckBox
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from PyQt6.QtGui import QFont, QIcon
@@ -26,6 +26,31 @@ class DownloadThread(QThread):
         super().__init__()
         self.download_type = download_type
         self.kwargs = kwargs
+        
+    def process_filename(self, title, extension=None):
+        """
+        Process filename: trim to 30 chars and replace spaces with underscores.
+        
+        Args:
+            title: Original video title
+            extension: File extension (e.g., 'mp4', 'webm')
+        
+        Returns:
+            Processed filename
+        """
+        # Replace spaces with underscores
+        filename = title.replace(' ', '_')
+        
+        # Trim to 30 characters (excluding extension)
+        max_length = 30
+        if len(filename) > max_length:
+            filename = filename[:max_length]
+        
+        # Add extension if provided
+        if extension:
+            filename = f"{filename}.{extension}"
+        
+        return filename
         
     def get_stream(self, yt, stream_type, file_extension, resolution):
         """Get stream based on user preferences"""
@@ -127,7 +152,27 @@ class DownloadThread(QThread):
                     file_size = f" ({stream.filesize / (1024*1024):.2f} MB)"
                 
                 self.progress.emit(f"Downloading: {yt.title}{info_str}{file_size}")
-                stream.download(output_path=output_path)
+                
+                # Process filename if option is enabled
+                trim_filename = self.kwargs.get("trim_filename", False)
+                if trim_filename:
+                    # Get file extension from stream
+                    stream_ext = None
+                    if hasattr(stream, 'mime_type') and stream.mime_type:
+                        mime_parts = stream.mime_type.split('/')
+                        if len(mime_parts) > 1:
+                            stream_ext = mime_parts[-1].split(';')[0].strip()  # Handle 'video/mp4; codecs="..."'
+                    elif hasattr(stream, 'subtype'):
+                        stream_ext = stream.subtype
+                    
+                    # If we couldn't get extension from stream, try to infer from file_extension setting
+                    if not stream_ext and file_extension != "auto":
+                        stream_ext = file_extension
+                    
+                    custom_filename = self.process_filename(yt.title, stream_ext)
+                    stream.download(output_path=output_path, filename=custom_filename)
+                else:
+                    stream.download(output_path=output_path)
                 
                 self.finished.emit(True, f"Download completed: {yt.title}")
                 
@@ -192,7 +237,27 @@ class DownloadThread(QThread):
                             file_size = f" ({stream.filesize / (1024*1024):.2f} MB)"
                         
                         self.progress.emit(f"[{i}/{len(urls)}] Downloading: {yt.title}{info_str}{file_size}")
-                        stream.download(output_path=output_path)
+                        
+                        # Process filename if option is enabled
+                        if trim_filename:
+                            # Get file extension from stream
+                            stream_ext = None
+                            if hasattr(stream, 'mime_type') and stream.mime_type:
+                                mime_parts = stream.mime_type.split('/')
+                                if len(mime_parts) > 1:
+                                    stream_ext = mime_parts[-1].split(';')[0].strip()
+                            elif hasattr(stream, 'subtype'):
+                                stream_ext = stream.subtype
+                            
+                            # If we couldn't get extension from stream, try to infer from file_extension setting
+                            if not stream_ext and file_extension != "auto":
+                                stream_ext = file_extension
+                            
+                            custom_filename = self.process_filename(yt.title, stream_ext)
+                            stream.download(output_path=output_path, filename=custom_filename)
+                        else:
+                            stream.download(output_path=output_path)
+                        
                         successful += 1
                         self.progress.emit(f"[{i}/{len(urls)}] ✓ Completed: {yt.title}")
                     except Exception as e:
@@ -218,6 +283,7 @@ class YouTubeDownloaderGUI(QMainWindow):
         self.stream_type_index = self.config_data.get('stream_type_index', 0)
         self.file_extension_index = self.config_data.get('file_extension_index', 0)
         self.resolution_index = self.config_data.get('resolution_index', 0)
+        self.trim_filename = self.config_data.get('trim_filename', False)
         self.init_ui()
         
     def load_config(self):
@@ -229,7 +295,8 @@ class YouTubeDownloaderGUI(QMainWindow):
             'output_directory': default_directory,
             'stream_type_index': 0,
             'file_extension_index': 0,
-            'resolution_index': 0
+            'resolution_index': 0,
+            'trim_filename': False
         }
         
         if self.config_file.exists():
@@ -262,6 +329,13 @@ class YouTubeDownloaderGUI(QMainWindow):
                             settings['resolution_index'] = config.getint('Settings', 'resolution_index')
                         except (ValueError, configparser.NoOptionError):
                             pass
+                    
+                    # Load trim filename option
+                    if config.has_option('Settings', 'trim_filename'):
+                        try:
+                            settings['trim_filename'] = config.getboolean('Settings', 'trim_filename')
+                        except (ValueError, configparser.NoOptionError):
+                            pass
             except Exception as e:
                 # If there's an error reading config, use defaults
                 print(f"Error reading config: {e}")
@@ -288,6 +362,10 @@ class YouTubeDownloaderGUI(QMainWindow):
             config.set('Settings', 'stream_type_index', str(self.stream_type_combo.currentIndex()))
             config.set('Settings', 'file_extension_index', str(self.file_extension_combo.currentIndex()))
             config.set('Settings', 'resolution_index', str(self.resolution_combo.currentIndex()))
+        
+        # Save trim filename option
+        if hasattr(self, 'trim_filename_checkbox'):
+            config.set('Settings', 'trim_filename', str(self.trim_filename_checkbox.isChecked()))
         
         # Write to file
         try:
@@ -360,7 +438,7 @@ class YouTubeDownloaderGUI(QMainWindow):
         # Add initial status message
         self.log_message("Application started. Ready to download videos.")
         
-    def create_format_options_group(self, stream_type_idx=0, file_ext_idx=0, resolution_idx=0, is_list_tab=False):
+    def create_format_options_group(self, stream_type_idx=0, file_ext_idx=0, resolution_idx=0, trim_filename=False, is_list_tab=False):
         """Create format options group box"""
         group = QGroupBox("Download Format Options")
         layout = QVBoxLayout()
@@ -405,11 +483,18 @@ class YouTubeDownloaderGUI(QMainWindow):
         resolution_layout.addWidget(resolution_combo)
         layout.addLayout(resolution_layout)
         
+        # Filename processing option
+        trim_checkbox = QCheckBox("Trim filename to 30 chars and replace spaces with underscores")
+        trim_checkbox.setChecked(trim_filename)
+        trim_checkbox.stateChanged.connect(self.save_config)
+        layout.addWidget(trim_checkbox)
+        
         # Store references for single video tab
         if not is_list_tab:
             self.stream_type_combo = stream_type_combo
             self.file_extension_combo = file_extension_combo
             self.resolution_combo = resolution_combo
+            self.trim_filename_checkbox = trim_checkbox
         
         group.setLayout(layout)
         return group
@@ -435,6 +520,7 @@ class YouTubeDownloaderGUI(QMainWindow):
             self.stream_type_index,
             self.file_extension_index,
             self.resolution_index,
+            self.trim_filename,
             is_list_tab=False
         )
         layout.addWidget(format_group)
@@ -489,6 +575,7 @@ class YouTubeDownloaderGUI(QMainWindow):
             self.stream_type_index,
             self.file_extension_index,
             self.resolution_index,
+            self.trim_filename,
             is_list_tab=True
         )
         layout.addWidget(self.list_format_group)
@@ -602,6 +689,7 @@ class YouTubeDownloaderGUI(QMainWindow):
             
         # Get format options
         stream_type, file_extension, resolution = self.get_format_options()
+        trim_filename = self.trim_filename_checkbox.isChecked() if hasattr(self, 'trim_filename_checkbox') else False
         
         self.log_message(f"Starting download: {url}")
         self.progress_bar.setVisible(True)
@@ -616,7 +704,8 @@ class YouTubeDownloaderGUI(QMainWindow):
             output_path=self.output_directory,
             stream_type=stream_type,
             file_extension=file_extension,
-            resolution=resolution
+            resolution=resolution,
+            trim_filename=trim_filename
         )
         self.download_thread.progress.connect(self.on_progress)
         self.download_thread.finished.connect(lambda success, msg: self.on_download_finished(success, msg, original_dir))
@@ -638,6 +727,9 @@ class YouTubeDownloaderGUI(QMainWindow):
             
         # Get format options from list tab
         stream_type, file_extension, resolution = self.get_format_options(self.list_format_group)
+        # Get trim filename option from list tab format group
+        list_children = self.list_format_group.findChildren(QCheckBox)
+        trim_filename = list_children[0].isChecked() if list_children else False
         
         self.log_message(f"Starting download from list: {self.list_file_path}")
         self.progress_bar.setVisible(True)
@@ -651,7 +743,8 @@ class YouTubeDownloaderGUI(QMainWindow):
             output_path=self.output_directory,
             stream_type=stream_type,
             file_extension=file_extension,
-            resolution=resolution
+            resolution=resolution,
+            trim_filename=trim_filename
         )
         self.download_thread.progress.connect(self.on_progress)
         self.download_thread.finished.connect(lambda success, msg: self.on_download_finished(success, msg, original_dir))
